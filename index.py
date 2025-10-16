@@ -415,9 +415,7 @@ def get_ai_response(user_input, conversation_history=None):
     try:
         messages = []
         
-        system_message = """You are an expert AI assistant specialized in code generation and programming. 
-When generating code, follow these guidelines:
-For non-code questions, provide clear, concise, and accurate responses."""
+        system_message = """ """
         
         ocr_context = enhance_system_prompt_with_ocr()
         system_message += ocr_context
@@ -459,10 +457,6 @@ For non-code questions, provide clear, concise, and accurate responses."""
         else:
             return f"Error: Ollama API returned status code {response.status_code}. Make sure Ollama is running and the model is available."
         
-    except requests.exceptions.ConnectionError:
-        return f"Connection error: Cannot connect to Ollama at {st.session_state.ollama_url}. Please make sure Ollama is running."
-    except requests.exceptions.Timeout:
-        return "Request timeout: Ollama is taking too long to respond."
     except Exception as e:
         return f"An error occurred: {str(e)}"
 
@@ -471,10 +465,7 @@ def get_ai_response_streamed(user_input, conversation_history=None):
     try:
         messages = []
         
-        system_message = """You are an expert AI assistant specialized in code generation and programming. 
-When generating code, follow these guidelines:
-1. Provide complete, runnable code examples
-For non-code questions, provide clear, concise, and accurate responses."""
+        system_message = """ """
         
         ocr_context = enhance_system_prompt_with_ocr()
         system_message += ocr_context
@@ -843,10 +834,7 @@ with st.sidebar:
         if st.button("🗑️ Clear All Chats", use_container_width=True, type="secondary"):
             delete_all_chats()
             st.rerun()
-    
-    if not ocr_available:
-        st.warning("⚠️ OCR not available. Install Tesseract OCR for text extraction.")
-    
+
     search_query = st.text_input(
         "Search chats",
         value=st.session_state.search_query,
@@ -900,12 +888,7 @@ with st.sidebar:
                             st.rerun()
                     
                     with col2:
-                        if st.button(
-                            "🗑️",
-                            key=f"delete_{chat['id']}",
-                            help=f"Delete this chat",
-                            use_container_width=True
-                        ):
+                        if st.button("🗑️", key=f"delete_{chat['id']}", help=f"Delete this chat", use_container_width=True ):
                             delete_chat(chat["id"])
                             st.rerun()
                 
