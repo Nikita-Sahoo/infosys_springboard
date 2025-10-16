@@ -7,45 +7,27 @@ context-aware responses. It includes OCR functionality for extracting text from 
 
 ## 🧠 Key Features
 
-### 🤖 AI Capabilities
-- **Conversational AI** using LLAMA for natural, context-aware responses
-- **Streaming Responses** - Real-time AI response display
-- **System Prompts** - Customizable AI behavior and expertise
+- 🤖 AI Capabilities
+- 📄 Document Processing
+- 💾 Data Management
+- 🎨 User Experience
 
-### 📄 Document Processing
-- **OCR Integration** - Extract text from images (JPG, PNG, BMP, TIFF)
-- **PDF Processing** - Text extraction from PDF documents
-- **Document Support** - DOCX, TXT, CSV file processing
-- **Image Preprocessing** - Enhanced OCR with image optimization
-
-### 💾 Data Management
-- **SQLite Database** - Persistent chat history and user sessions
-- **Chat Management** - Create, delete, and search conversations
-- **File Storage** - Organized upload management with metadata
-- **Session Persistence** - Maintain context across app restarts
-
-### 🎨 User Experience
-- **Streamlit UI** - Clean, responsive chat interface
-- **Sidebar Navigation** - Easy chat history management
-- **File Upload** - Drag-and-drop file support
-- **Real-time Updates** - Live chat with typing indicators
 
 ## 🛠 Tech Stack
 
-### Frontend
+Frontend
 - **Streamlit** - Web application framework
-- **PIL/Pillow** - Image processing and manipulation
+- **Python** - Python manipulation
 
-### Backend & AI
+Backend & AI
 - **Ollama** - Local LLM inference engine
 - **LLaMA 3/CodeLlama** - Open-source language models
 
-### OCR & Document Processing
+OCR & Document Processing
 - **Tesseract OCR** - Optical character recognition
 
-### Database
+Database
 - **SQLite** - Lightweight relational database
-- **SQLAlchemy** (Optional) - Database ORM
 
 ## 📦 Installation
 
