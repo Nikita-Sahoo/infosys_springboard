@@ -39,13 +39,9 @@ context-aware responses. It includes OCR functionality for extracting text from 
 ### Backend & AI
 - **Ollama** - Local LLM inference engine
 - **LLaMA 3/CodeLlama** - Open-source language models
-- **Transformers** - NLP model integration
 
 ### OCR & Document Processing
 - **Tesseract OCR** - Optical character recognition
-- **pdfplumber** - PDF text extraction
-- **python-docx** - Word document processing
-- **pandas** - CSV and data file handling
 
 ### Database
 - **SQLite** - Lightweight relational database
@@ -57,4 +53,6 @@ context-aware responses. It includes OCR functionality for extracting text from 
 - Python 3.8+
 - Tesseract OCR
 - Ollama (for local AI)
+
+- 📚 Use Case This chatbot can serve as a base for: Intelligent document assistants Academic research helpers AI-powered customer support bots Personalized chat companions
 
