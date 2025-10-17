@@ -1,31 +1,50 @@
 import streamlit as st
+import random
+import time
 from datetime import datetime, timedelta
-import requests, json, pickle, os, sqlite3
+import requests
+import json
+import pickle
+import os
+import sqlite3
 from pathlib import Path
+import re
 from PIL import Image
 import pytesseract
 import io
+import base64
 
 # Set page configuration
-st.set_page_config(page_title="ChatGPT - Code Assistant", page_icon="🤖", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(
+    page_title="ChatGPT - Code Assistant",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="auto"
+)
 
 # Constants
 MAX_CHAT_HISTORY = 15
 DATA_FILE = "chat_history.pkl"
 DB_FILE = "chat_history.db"
 
-# ocr setup 
 def setup_ocr():
     """Setup OCR configuration based on operating system"""
     try:
+        # For Windows - you might need to adjust this path
         pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
         return True
     except:
-        return False
+        try:
+            # For Linux/Mac - usually in PATH
+            pytesseract.pytesseract.tesseract_cmd = 'tesseract'
+            return True
+        except:
+            return False
 
 def extract_text_from_image(image):
     """Extract text from uploaded image using OCR"""
     try:
+        # Convert image to RGB if necessary
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
@@ -54,11 +73,19 @@ def enhance_system_prompt_with_ocr():
     ocr_context = ""
     if st.session_state.get('ocr_extracted_text'):
         ocr_context = f"""
-        extracted text: "{st.session_state.ocr_extracted_text}"
-        """
+        
+OCR CONTEXT (Important - user is asking about an uploaded image):
+The user has uploaded an image with the following extracted text:
+"{st.session_state.ocr_extracted_text}"
+
+When responding to questions about the image content:
+1. Reference the extracted text directly when relevant
+2. Provide insights, analysis, or explanations based on the OCR content
+3. If the question is unclear, ask for clarification about which part of the extracted text they're referring to
+4. Maintain context about the OCR content throughout the conversation
+"""
     return ocr_context
 
-# database implimentation 
 def initialize_database():
     """Initialize SQLite database for chat history"""
     conn = sqlite3.connect(DB_FILE)
@@ -66,9 +93,18 @@ def initialize_database():
     c.execute('''
         CREATE TABLE IF NOT EXISTS chats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER, title TEXT, messages TEXT, date TEXT, last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, image_data BLOB, extracted_text TEXT)
+            chat_id INTEGER,
+            title TEXT,
+            messages TEXT,
+            date TEXT,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            image_data BLOB,
+            extracted_text TEXT
+        )
     ''')
+    
+    # Create index for better performance
     c.execute('CREATE INDEX IF NOT EXISTS idx_chat_id ON chats(chat_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_last_updated ON chats(last_updated)')
     
@@ -80,6 +116,8 @@ def save_chats_to_db():
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
+        
+        # Clear existing data for this session's chats
         current_chat_ids = [chat["id"] for chat in st.session_state.chat_history]
         
         if current_chat_ids:
@@ -90,10 +128,11 @@ def save_chats_to_db():
         
         # Insert current chats
         for chat in st.session_state.chat_history:
+            # Prepare messages for JSON serialization - remove image data from messages
             serializable_messages = []
             for msg in chat["messages"]:
                 serializable_msg = msg.copy()
-
+                # Remove image_data from messages as it's stored separately in BLOB
                 if 'image_data' in serializable_msg:
                     del serializable_msg['image_data']
                 serializable_messages.append(serializable_msg)
@@ -149,11 +188,13 @@ def load_chats_from_db():
         chats = []
         for row in rows:
             try:
-                # Reconstruct messages with image data if available
+                # Load messages from JSON
                 messages = json.loads(row[2]) if row[2] else []
+                
+                # Get image data from BLOB column
                 image_data = row[5]
                 
-                # If we have image data and this is an image chat, add image_data to the first user message
+                # If we have image data, add it back to the appropriate message
                 if image_data and messages:
                     for msg in messages:
                         if msg.get("type") == "image" and msg.get("role") == "user":
@@ -161,8 +202,13 @@ def load_chats_from_db():
                             break
                 
                 chat_data = {
-                    "id": row[0], "title": row[1], "messages": messages, "date": row[3], "last_updated": row[4],
-                    "image_data": image_data, "extracted_text": row[6] or ""
+                    "id": row[0],
+                    "title": row[1],
+                    "messages": messages,
+                    "date": row[3],
+                    "last_updated": row[4],
+                    "image_data": image_data,
+                    "extracted_text": row[6] or ""
                 }
                 chats.append(chat_data)
             except json.JSONDecodeError as e:
@@ -198,7 +244,9 @@ def get_database_stats():
         conn.close()
         
         return {
-            "total_chats": total_chats, "total_entries": total_entries, "database_size": f"{db_size / 1024 / 1024:.2f} MB"
+            "total_chats": total_chats,
+            "total_entries": total_entries,
+            "database_size": f"{db_size / 1024 / 1024:.2f} MB"
         }
     except Exception as e:
         return {"error": str(e)}
@@ -223,7 +271,6 @@ def backup_database():
 def save_chats_to_file():
     """Save chat history to pickle file"""
     try:
-        # Prepare data for pickle - handle image data properly
         data = {
             "chat_history": st.session_state.chat_history,
             "next_chat_id": st.session_state.next_chat_id
@@ -256,11 +303,24 @@ def get_code_models_recommendation():
         "llama2:latest",
         "mistral:latest",
         "phi:latest",
+        "wizardcoder:latest",
+        "starcoder:latest"
     ]
 
 def get_code_templates():
     """Return code generation template buttons"""
-    templates = {  }
+    templates = {
+        # "Python Function": "Write a Python function that",
+        # "Web API": "Create a REST API using",
+        # "Data Analysis": "Write code for data analysis with",
+        # "Machine Learning": "Implement a machine learning model for",
+        # "Web Scraping": "Create a web scraper for",
+        # "Database Query": "Write SQL queries for",
+        # "React Component": "Create a React component that",
+        # "Algorithm": "Implement an algorithm for",
+        # "HTML/CSS Page": "Create an HTML page with CSS for",
+        # "JavaScript Function": "Write a JavaScript function that"
+    }
     return templates
 
 def show_code_templates():
@@ -302,7 +362,10 @@ def organize_chats_by_date(chats):
     last_week = today - timedelta(days=7)
     
     sections = {
-        "Today": [], "Yesterday": [], "Previous 7 Days": [], "Older": []
+        "Today": [],
+        "Yesterday": [],
+        "Previous 7 Days": [],
+        "Older": []
     }
     
     for chat in chats:
@@ -338,7 +401,6 @@ def initialize_session_state():
     else:
         chat_history, next_chat_id = load_chats_from_file()
     
-    # Initialize session state variables
     default_state = {
         "messages": [],
         "chat_history": chat_history,
@@ -378,7 +440,20 @@ def get_ai_response(user_input, conversation_history=None):
     try:
         messages = []
         
-        system_message = """ """
+        system_message = """You are an expert AI assistant specialized in code generation and programming. 
+When generating code, follow these guidelines:
+1. Provide complete, runnable code examples
+2. Include proper syntax highlighting markers (e.g., ```python, ```javascript, etc.)
+3. Add comments to explain complex parts
+4. Suggest best practices and optimizations
+5. Mention any dependencies or setup requirements
+6. Provide usage examples when applicable
+7. If the code is long, break it into logical sections with explanations
+8. Include error handling where appropriate
+9. Follow language-specific conventions and style guides
+10. Consider performance and security aspects
+
+For non-code questions, provide clear, concise, and accurate responses."""
         
         ocr_context = enhance_system_prompt_with_ocr()
         system_message += ocr_context
@@ -420,6 +495,10 @@ def get_ai_response(user_input, conversation_history=None):
         else:
             return f"Error: Ollama API returned status code {response.status_code}. Make sure Ollama is running and the model is available."
         
+    except requests.exceptions.ConnectionError:
+        return f"Connection error: Cannot connect to Ollama at {st.session_state.ollama_url}. Please make sure Ollama is running."
+    except requests.exceptions.Timeout:
+        return "Request timeout: Ollama is taking too long to respond."
     except Exception as e:
         return f"An error occurred: {str(e)}"
 
@@ -427,7 +506,21 @@ def get_ai_response_streamed(user_input, conversation_history=None):
     """Generate AI response using Ollama with streaming for better UX"""
     try:
         messages = []
-        system_message = """ """
+        
+        system_message = """You are an expert AI assistant specialized in code generation and programming. 
+When generating code, follow these guidelines:
+1. Provide complete, runnable code examples
+2. Include proper syntax highlighting markers (e.g., ```python, ```javascript, etc.)
+3. Add comments to explain complex parts
+4. Suggest best practices and optimizations
+5. Mention any dependencies or setup requirements
+6. Provide usage examples when applicable
+7. If the code is long, break it into logical sections with explanations
+8. Include error handling where appropriate
+9. Follow language-specific conventions and style guides
+10. Consider performance and security aspects
+
+For non-code questions, provide clear, concise, and accurate responses."""
         
         ocr_context = enhance_system_prompt_with_ocr()
         system_message += ocr_context
@@ -478,7 +571,10 @@ def get_ai_response_streamed(user_input, conversation_history=None):
         else:
             yield f"Error: Ollama API returned status code {response.status_code}"
         
-
+    except requests.exceptions.ConnectionError:
+        yield f"Connection error: Cannot connect to Ollama at {st.session_state.ollama_url}"
+    except requests.exceptions.Timeout:
+        yield "Request timeout: Ollama is taking too long to respond."
     except Exception as e:
         yield f"An error occurred: {str(e)}"
 
@@ -574,8 +670,13 @@ def save_current_chat(update_timestamp=True):
             extracted_text = st.session_state.get('ocr_extracted_text', '')
             
             chat_data = {
-                "id": chat_id, "title": chat_title, "messages": st.session_state.messages.copy(), "date": current_time, "last_updated": current_time,
-                "image_data": image_data, "extracted_text": extracted_text
+                "id": chat_id,
+                "title": chat_title,
+                "messages": st.session_state.messages.copy(),
+                "date": current_time,
+                "last_updated": current_time,
+                "image_data": image_data,
+                "extracted_text": extracted_text
             }
             
             st.session_state.chat_history.insert(0, chat_data)
@@ -705,7 +806,11 @@ def process_uploaded_image(uploaded_image):
             current_image_data = uploaded_image.getvalue()
             
             image_message = {
-                "role": "user", "content": "📷 Image uploaded for analysis", "type": "image", "image_data": current_image_data, "extracted_text": extracted_text
+                "role": "user", 
+                "content": "📷 Image uploaded for analysis",
+                "type": "image",
+                "image_data": current_image_data,
+                "extracted_text": extracted_text
             }
             st.session_state.messages.append(image_message)
             
@@ -787,7 +892,10 @@ with st.sidebar:
         if st.button("🗑️ Clear All Chats", use_container_width=True, type="secondary"):
             delete_all_chats()
             st.rerun()
-
+    
+    if not ocr_available:
+        st.warning("⚠️ OCR not available. Install Tesseract OCR for text extraction.")
+    
     search_query = st.text_input(
         "Search chats",
         value=st.session_state.search_query,
@@ -841,7 +949,12 @@ with st.sidebar:
                             st.rerun()
                     
                     with col2:
-                        if st.button("🗑️", key=f"delete_{chat['id']}", help=f"Delete this chat", use_container_width=True ):
+                        if st.button(
+                            "🗑️",
+                            key=f"delete_{chat['id']}",
+                            help=f"Delete this chat",
+                            use_container_width=True
+                        ):
                             delete_chat(chat["id"])
                             st.rerun()
                 
@@ -852,23 +965,25 @@ with st.sidebar:
         else:
             st.info("No chat history yet. Start a new chat to begin!")
 
-    if st.session_state.chat_history and st.session_state.storage_type == "database":
-        st.markdown("---")
-        stats = get_database_stats()
-        if "error" not in stats:
-            st.caption(f"💾 Database Stats:")
-            st.caption(f"• {stats['total_chats']} chats")
-            st.caption(f"• {stats['database_size']}")
-            
-            if st.button("💾 Backup Database", use_container_width=True, key="backup_db"):
-                backup_file = backup_database()
-                if backup_file:
-                    st.success(f"Backup created: {backup_file}")
-                else:
-                    st.error("Backup failed")
-
 # Main chat area
 st.title("ChatGPT")
+
+if not test_ollama_connection():
+    st.error(f"⚠️ Cannot connect to Ollama at {st.session_state.ollama_url}. Please make sure Ollama is running.")
+    st.info("**For optimal code generation, install these recommended models:**")
+    st.code("""
+# Install Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Start Ollama service
+ollama serve
+
+# Pull code-specific models (in a new terminal)
+ollama pull codellama:latest
+ollama pull deepseek-coder:latest
+ollama pull codeqwen:latest
+ollama pull llama2:latest
+    """)
 
 if st.session_state.current_chat_id and st.session_state.messages:
     current_chat = next((chat for chat in st.session_state.chat_history 
@@ -926,6 +1041,14 @@ if st.session_state.messages:
                                     st.code(code_content, language=language)
                         else:
                             st.write(content)
+else:
+    if not st.session_state.current_chat_id:
+        st.info("👈 Start a new chat or select one from the history to begin!")
+    else:
+        if st.session_state.image_chat_mode:
+            st.info("💡 Upload an image to start analyzing its content!")
+        else:
+            st.info("💡 Start a conversation with your AI code assistant!")
 
 # Auto-generate response when image is uploaded
 if st.session_state.get('auto_process_image') and st.session_state.get('ocr_extracted_text'):
@@ -934,7 +1057,15 @@ if st.session_state.get('auto_process_image') and st.session_state.get('ocr_extr
         I've uploaded an image with the following extracted text: 
         "{st.session_state.ocr_extracted_text}"
         
+        Please analyze this content and provide:
+        1. A summary of what the text is about
+        2. Key points or important information found
+        3. Any insights or observations about the content
+        4. Suggestions for what I might want to ask about this content
+        
+        Keep the response concise but informative.
         """
+        
         chat_id = get_or_create_chat_session()
         
         if not st.session_state.chat_started:
@@ -1053,4 +1184,17 @@ if prompt:
     st.session_state.messages.append({"role": "assistant", "content": ai_response})
     
     save_current_chat(update_timestamp=True)
+    
     st.rerun()
+
+if len(st.session_state.chat_history) >= st.session_state.max_chat_history:
+    st.warning(f"""
+    ⚠️ **Memory Full!** 
+    
+    You've reached the maximum limit of {st.session_state.max_chat_history} chats. 
+    
+    To create new chats:
+    - Delete old chats using the 🗑️ button in the sidebar
+    - Or use the "Clear All Chats" button to start fresh
+    """)
+
