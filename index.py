@@ -6,8 +6,6 @@ import requests
 import json
 import pickle
 import os
-import sqlite3
-from pathlib import Path
 import re
 from PIL import Image
 import pytesseract
@@ -25,7 +23,6 @@ st.set_page_config(
 # Constants
 MAX_CHAT_HISTORY = 15
 DATA_FILE = "chat_history.pkl"
-DB_FILE = "chat_history.db"
 
 def setup_ocr():
     """Setup OCR configuration based on operating system"""
@@ -86,188 +83,6 @@ When responding to questions about the image content:
 """
     return ocr_context
 
-def initialize_database():
-    """Initialize SQLite database for chat history"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS chats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            title TEXT,
-            messages TEXT,
-            date TEXT,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            image_data BLOB,
-            extracted_text TEXT
-        )
-    ''')
-    
-    # Create index for better performance
-    c.execute('CREATE INDEX IF NOT EXISTS idx_chat_id ON chats(chat_id)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_last_updated ON chats(last_updated)')
-    
-    conn.commit()
-    conn.close()
-
-def save_chats_to_db():
-    """Save chat history to SQLite database"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        
-        # Clear existing data for this session's chats
-        current_chat_ids = [chat["id"] for chat in st.session_state.chat_history]
-        
-        if current_chat_ids:
-            placeholders = ','.join('?' for _ in current_chat_ids)
-            c.execute(f'DELETE FROM chats WHERE chat_id IN ({placeholders})', current_chat_ids)
-        else:
-            c.execute("DELETE FROM chats")
-        
-        # Insert current chats
-        for chat in st.session_state.chat_history:
-            # Prepare messages for JSON serialization - remove image data from messages
-            serializable_messages = []
-            for msg in chat["messages"]:
-                serializable_msg = msg.copy()
-                # Remove image_data from messages as it's stored separately in BLOB
-                if 'image_data' in serializable_msg:
-                    del serializable_msg['image_data']
-                serializable_messages.append(serializable_msg)
-            
-            # Convert image data to bytes if it exists
-            image_data = None
-            if chat.get("image_data"):
-                if isinstance(chat["image_data"], bytes):
-                    image_data = chat["image_data"]
-                else:
-                    # If it's a file-like object, convert to bytes
-                    try:
-                        image_data = chat["image_data"].getvalue() if hasattr(chat["image_data"], 'getvalue') else bytes(chat["image_data"])
-                    except:
-                        image_data = None
-            
-            extracted_text = chat.get("extracted_text", "")
-            
-            c.execute('''
-                INSERT INTO chats (chat_id, title, messages, date, last_updated, image_data, extracted_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                chat["id"],
-                chat["title"],
-                json.dumps(serializable_messages, ensure_ascii=False),
-                chat["date"],
-                chat.get("last_updated", chat["date"]),
-                image_data,
-                extracted_text
-            ))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        st.error(f"Error saving to database: {e}")
-        return False
-
-def load_chats_from_db():
-    """Load chat history from SQLite database"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        
-        c.execute('''
-            SELECT chat_id, title, messages, date, last_updated, image_data, extracted_text 
-            FROM chats 
-            ORDER BY last_updated DESC
-        ''')
-        rows = c.fetchall()
-        conn.close()
-        
-        chats = []
-        for row in rows:
-            try:
-                # Load messages from JSON
-                messages = json.loads(row[2]) if row[2] else []
-                
-                # Get image data from BLOB column
-                image_data = row[5]
-                
-                # If we have image data, add it back to the appropriate message
-                if image_data and messages:
-                    for msg in messages:
-                        if msg.get("type") == "image" and msg.get("role") == "user":
-                            msg["image_data"] = image_data
-                            break
-                
-                chat_data = {
-                    "id": row[0],
-                    "title": row[1],
-                    "messages": messages,
-                    "date": row[3],
-                    "last_updated": row[4],
-                    "image_data": image_data,
-                    "extracted_text": row[6] or ""
-                }
-                chats.append(chat_data)
-            except json.JSONDecodeError as e:
-                st.error(f"Error parsing messages for chat {row[0]}: {e}")
-                continue
-            except Exception as e:
-                st.error(f"Error loading chat {row[0]}: {e}")
-                continue
-        
-        return chats
-    except Exception as e:
-        st.error(f"Error loading from database: {e}")
-        return []
-
-def get_database_stats():
-    """Get statistics about the database"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        
-        # Get total chat count
-        c.execute("SELECT COUNT(DISTINCT chat_id) FROM chats")
-        total_chats = c.fetchone()[0]
-        
-        # Get total message count
-        c.execute("SELECT COUNT(*) FROM chats")
-        total_entries = c.fetchone()[0]
-        
-        # Get storage size
-        c.execute("SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()")
-        db_size = c.fetchone()[0]
-        
-        conn.close()
-        
-        return {
-            "total_chats": total_chats,
-            "total_entries": total_entries,
-            "database_size": f"{db_size / 1024 / 1024:.2f} MB"
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-def backup_database():
-    """Create a backup of the database"""
-    try:
-        backup_file = f"chat_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        conn = sqlite3.connect(DB_FILE)
-        backup_conn = sqlite3.connect(backup_file)
-        
-        conn.backup(backup_conn)
-        
-        backup_conn.close()
-        conn.close()
-        
-        return backup_file
-    except Exception as e:
-        st.error(f"Backup failed: {e}")
-        return None
-
 def save_chats_to_file():
     """Save chat history to pickle file"""
     try:
@@ -310,16 +125,7 @@ def get_code_models_recommendation():
 def get_code_templates():
     """Return code generation template buttons"""
     templates = {
-        # "Python Function": "Write a Python function that",
-        # "Web API": "Create a REST API using",
-        # "Data Analysis": "Write code for data analysis with",
-        # "Machine Learning": "Implement a machine learning model for",
-        # "Web Scraping": "Create a web scraper for",
-        # "Database Query": "Write SQL queries for",
-        # "React Component": "Create a React component that",
-        # "Algorithm": "Implement an algorithm for",
-        # "HTML/CSS Page": "Create an HTML page with CSS for",
-        # "JavaScript Function": "Write a JavaScript function that"
+        
     }
     return templates
 
@@ -388,18 +194,8 @@ def organize_chats_by_date(chats):
 
 def initialize_session_state():
     """Initialize all session state variables with persistent data"""
-    initialize_database()
-    
-    if "storage_type" not in st.session_state:
-        st.session_state.storage_type = "database"
-    
-    chat_history = load_chats_from_db()
-    next_chat_id = 1
-    
-    if chat_history:
-        next_chat_id = max(chat["id"] for chat in chat_history) + 1
-    else:
-        chat_history, next_chat_id = load_chats_from_file()
+    # Load from file storage
+    chat_history, next_chat_id = load_chats_from_file()
     
     default_state = {
         "messages": [],
@@ -444,14 +240,6 @@ def get_ai_response(user_input, conversation_history=None):
 When generating code, follow these guidelines:
 1. Provide complete, runnable code examples
 2. Include proper syntax highlighting markers (e.g., ```python, ```javascript, etc.)
-3. Add comments to explain complex parts
-4. Suggest best practices and optimizations
-5. Mention any dependencies or setup requirements
-6. Provide usage examples when applicable
-7. If the code is long, break it into logical sections with explanations
-8. Include error handling where appropriate
-9. Follow language-specific conventions and style guides
-10. Consider performance and security aspects
 
 For non-code questions, provide clear, concise, and accurate responses."""
         
@@ -511,14 +299,6 @@ def get_ai_response_streamed(user_input, conversation_history=None):
 When generating code, follow these guidelines:
 1. Provide complete, runnable code examples
 2. Include proper syntax highlighting markers (e.g., ```python, ```javascript, etc.)
-3. Add comments to explain complex parts
-4. Suggest best practices and optimizations
-5. Mention any dependencies or setup requirements
-6. Provide usage examples when applicable
-7. If the code is long, break it into logical sections with explanations
-8. Include error handling where appropriate
-9. Follow language-specific conventions and style guides
-10. Consider performance and security aspects
 
 For non-code questions, provide clear, concise, and accurate responses."""
         
@@ -600,16 +380,9 @@ def test_ollama_connection():
         return False
 
 def save_persistent_data():
-    """Save chat history to persistent storage with fallback"""
+    """Save chat history to persistent storage"""
     try:
-        if st.session_state.storage_type == "database":
-            success = save_chats_to_db()
-            if not success:
-                st.warning("Database save failed, falling back to file storage")
-                return save_chats_to_file()
-            return success
-        else:
-            return save_chats_to_file()
+        return save_chats_to_file()
     except Exception as e:
         st.error(f"Error saving persistent data: {e}")
         return False
@@ -745,8 +518,6 @@ def delete_all_chats():
     try:
         if os.path.exists(DATA_FILE):
             os.remove(DATA_FILE)
-        if os.path.exists(DB_FILE):
-            os.remove(DB_FILE)
     except:
         pass
     
@@ -1059,9 +830,6 @@ if st.session_state.get('auto_process_image') and st.session_state.get('ocr_extr
         
         Please analyze this content and provide:
         1. A summary of what the text is about
-        2. Key points or important information found
-        3. Any insights or observations about the content
-        4. Suggestions for what I might want to ask about this content
         
         Keep the response concise but informative.
         """
@@ -1192,9 +960,4 @@ if len(st.session_state.chat_history) >= st.session_state.max_chat_history:
     ⚠️ **Memory Full!** 
     
     You've reached the maximum limit of {st.session_state.max_chat_history} chats. 
-    
-    To create new chats:
-    - Delete old chats using the 🗑️ button in the sidebar
-    - Or use the "Clear All Chats" button to start fresh
     """)
-
