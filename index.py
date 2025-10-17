@@ -7,36 +7,25 @@ import pytesseract
 import io
 
 # Set page configuration
-st.set_page_config(
-    page_title="ChatGPT - Code Assistant",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="auto"
-)
+st.set_page_config(page_title="ChatGPT - Code Assistant", page_icon="🤖", layout="wide", initial_sidebar_state="auto")
 
 # Constants
 MAX_CHAT_HISTORY = 15
 DATA_FILE = "chat_history.pkl"
 DB_FILE = "chat_history.db"
 
+# ocr setup 
 def setup_ocr():
     """Setup OCR configuration based on operating system"""
     try:
-        # For Windows - you might need to adjust this path
         pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
         return True
     except:
-        try:
-            # For Linux/Mac - usually in PATH
-            pytesseract.pytesseract.tesseract_cmd = 'tesseract'
-            return True
-        except:
-            return False
+        return False
 
 def extract_text_from_image(image):
     """Extract text from uploaded image using OCR"""
     try:
-        # Convert image to RGB if necessary
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
@@ -65,12 +54,11 @@ def enhance_system_prompt_with_ocr():
     ocr_context = ""
     if st.session_state.get('ocr_extracted_text'):
         ocr_context = f"""
-        
- extracted text:
-"{st.session_state.ocr_extracted_text}"
-"""
+        extracted text: "{st.session_state.ocr_extracted_text}"
+        """
     return ocr_context
 
+# database implimentation 
 def initialize_database():
     """Initialize SQLite database for chat history"""
     conn = sqlite3.connect(DB_FILE)
@@ -78,18 +66,9 @@ def initialize_database():
     c.execute('''
         CREATE TABLE IF NOT EXISTS chats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            title TEXT,
-            messages TEXT,
-            date TEXT,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            image_data BLOB,
-            extracted_text TEXT
-        )
+            chat_id INTEGER, title TEXT, messages TEXT, date TEXT, last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, image_data BLOB, extracted_text TEXT)
     ''')
-    
-    # Create index for better performance
     c.execute('CREATE INDEX IF NOT EXISTS idx_chat_id ON chats(chat_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_last_updated ON chats(last_updated)')
     
@@ -101,8 +80,6 @@ def save_chats_to_db():
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        
-        # Clear existing data for this session's chats
         current_chat_ids = [chat["id"] for chat in st.session_state.chat_history]
         
         if current_chat_ids:
@@ -113,11 +90,10 @@ def save_chats_to_db():
         
         # Insert current chats
         for chat in st.session_state.chat_history:
-            # Prepare messages for JSON serialization - remove image data from messages
             serializable_messages = []
             for msg in chat["messages"]:
                 serializable_msg = msg.copy()
-                # Remove image_data from messages as it's stored separately
+
                 if 'image_data' in serializable_msg:
                     del serializable_msg['image_data']
                 serializable_messages.append(serializable_msg)
@@ -185,13 +161,8 @@ def load_chats_from_db():
                             break
                 
                 chat_data = {
-                    "id": row[0],
-                    "title": row[1],
-                    "messages": messages,
-                    "date": row[3],
-                    "last_updated": row[4],
-                    "image_data": image_data,
-                    "extracted_text": row[6] or ""
+                    "id": row[0], "title": row[1], "messages": messages, "date": row[3], "last_updated": row[4],
+                    "image_data": image_data, "extracted_text": row[6] or ""
                 }
                 chats.append(chat_data)
             except json.JSONDecodeError as e:
@@ -227,9 +198,7 @@ def get_database_stats():
         conn.close()
         
         return {
-            "total_chats": total_chats,
-            "total_entries": total_entries,
-            "database_size": f"{db_size / 1024 / 1024:.2f} MB"
+            "total_chats": total_chats, "total_entries": total_entries, "database_size": f"{db_size / 1024 / 1024:.2f} MB"
         }
     except Exception as e:
         return {"error": str(e)}
@@ -287,14 +256,11 @@ def get_code_models_recommendation():
         "llama2:latest",
         "mistral:latest",
         "phi:latest",
-    
     ]
 
 def get_code_templates():
     """Return code generation template buttons"""
-    templates = {
-        
-    }
+    templates = {  }
     return templates
 
 def show_code_templates():
@@ -336,10 +302,7 @@ def organize_chats_by_date(chats):
     last_week = today - timedelta(days=7)
     
     sections = {
-        "Today": [],
-        "Yesterday": [],
-        "Previous 7 Days": [],
-        "Older": []
+        "Today": [], "Yesterday": [], "Previous 7 Days": [], "Older": []
     }
     
     for chat in chats:
@@ -464,7 +427,6 @@ def get_ai_response_streamed(user_input, conversation_history=None):
     """Generate AI response using Ollama with streaming for better UX"""
     try:
         messages = []
-        
         system_message = """ """
         
         ocr_context = enhance_system_prompt_with_ocr()
@@ -612,13 +574,8 @@ def save_current_chat(update_timestamp=True):
             extracted_text = st.session_state.get('ocr_extracted_text', '')
             
             chat_data = {
-                "id": chat_id,
-                "title": chat_title,
-                "messages": st.session_state.messages.copy(),
-                "date": current_time,
-                "last_updated": current_time,
-                "image_data": image_data,
-                "extracted_text": extracted_text
+                "id": chat_id, "title": chat_title, "messages": st.session_state.messages.copy(), "date": current_time, "last_updated": current_time,
+                "image_data": image_data, "extracted_text": extracted_text
             }
             
             st.session_state.chat_history.insert(0, chat_data)
@@ -748,11 +705,7 @@ def process_uploaded_image(uploaded_image):
             current_image_data = uploaded_image.getvalue()
             
             image_message = {
-                "role": "user", 
-                "content": "📷 Image uploaded for analysis",
-                "type": "image",
-                "image_data": current_image_data,
-                "extracted_text": extracted_text
+                "role": "user", "content": "📷 Image uploaded for analysis", "type": "image", "image_data": current_image_data, "extracted_text": extracted_text
             }
             st.session_state.messages.append(image_message)
             
@@ -982,7 +935,6 @@ if st.session_state.get('auto_process_image') and st.session_state.get('ocr_extr
         "{st.session_state.ocr_extracted_text}"
         
         """
-        
         chat_id = get_or_create_chat_session()
         
         if not st.session_state.chat_started:
