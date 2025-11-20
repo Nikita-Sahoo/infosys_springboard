@@ -1,20 +1,19 @@
 import streamlit as st
-import random
-import time
 from datetime import datetime, timedelta
 import requests
 import json
 import pickle
 import os
-import re
 from PIL import Image
 import pytesseract
 import io
 import base64
+import platform
+import subprocess
 
 # Set page configuration
 st.set_page_config(
-    page_title="ChatGPT - Code Assistant",
+    page_title="AI Code Generator - Code Assistant",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="auto"
@@ -23,31 +22,66 @@ st.set_page_config(
 # Constants
 MAX_CHAT_HISTORY = 15
 DATA_FILE = "chat_history.pkl"
+IMAGE_DISPLAY_WIDTH = 400
 
-def setup_ocr():
+# ===== TESSERACT CONFIG =====
+def configure_tesseract():
     """Setup OCR configuration based on operating system"""
     try:
-        # For Windows - you might need to adjust this path
-        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        pytesseract.get_tesseract_version()
         return True
     except:
-        try:
-            # For Linux/Mac - usually in PATH
-            pytesseract.pytesseract.tesseract_cmd = 'tesseract'
-            return True
-        except:
-            return False
+        pass
+    
+    # Try to configure for Windows
+    if platform.system() == "Windows":
+        paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+        for path in paths:
+            if os.path.exists(path):
+                try:
+                    pytesseract.pytesseract.tesseract_cmd = path
+                    # Test the configuration
+                    subprocess.run([path, '--version'], timeout=10, capture_output=True)
+                    return True
+                except:
+                    continue
+    return False
+
+def optimize_image_for_ocr(image):
+    """Optimize image for better OCR results"""
+    try:
+        # Convert to grayscale for better OCR
+        if image.mode != "L":
+            image = image.convert("L")
+        # Resize if too large
+        if image.width > 1200:
+            ratio = 1200 / image.width
+            image = image.resize((1200, int(image.height * ratio)), Image.Resampling.LANCZOS)
+    except Exception as e:
+        st.error(f"Image optimization error: {e}")
+    return image
+
+def resize_image_for_display(image, target_width=IMAGE_DISPLAY_WIDTH):
+    """Resize image consistently for display purposes"""
+    try:
+        if image.width > target_width:
+            ratio = target_width / image.width
+            new_height = int(image.height * ratio)
+            image = image.resize((target_width, new_height), Image.Resampling.LANCZOS)
+        return image
+    except Exception as e:
+        st.error(f"Image resize error: {e}")
+        return image
 
 def extract_text_from_image(image):
-    """Extract text from uploaded image using OCR"""
+    """Extract text from uploaded image using OCR with optimization"""
     try:
-        # Convert image to RGB if necessary
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        
-        # Use pytesseract to extract text
-        extracted_text = pytesseract.image_to_string(image)
-        return extracted_text.strip()
+        image = optimize_image_for_ocr(image)
+        text = pytesseract.image_to_string(image, config='--oem 3 --psm 6')
+        return text.strip()
     except Exception as e:
         return f"Error extracting text: {str(e)}"
 
@@ -56,10 +90,10 @@ def clear_ocr_data():
     keys_to_remove = [
         'ocr_extracted_text', 
         'ocr_image_uploaded', 
-        'ocr_image_preview',
         'ocr_context_ready',
         'ocr_active_image',
-        'auto_process_image'
+        'user_text_input',
+        'current_uploaded_image'
     ]
     for key in keys_to_remove:
         if key in st.session_state:
@@ -71,15 +105,11 @@ def enhance_system_prompt_with_ocr():
     if st.session_state.get('ocr_extracted_text'):
         ocr_context = f"""
         
-OCR CONTEXT (Important - user is asking about an uploaded image):
+USER UPLOADED IMAGE CONTEXT:
 The user has uploaded an image with the following extracted text:
 "{st.session_state.ocr_extracted_text}"
 
-When responding to questions about the image content:
-1. Reference the extracted text directly when relevant
-2. Provide insights, analysis, or explanations based on the OCR content
-3. If the question is unclear, ask for clarification about which part of the extracted text they're referring to
-4. Maintain context about the OCR content throughout the conversation
+Please analyze this content and answer the user's question based on the extracted text from the image.
 """
     return ocr_context
 
@@ -109,37 +139,6 @@ def load_chats_from_file():
         st.error(f"Error loading from file: {e}")
         return [], 1
 
-def get_code_models_recommendation():
-    """Return recommended models for code generation"""
-    return [
-        "codellama:latest",
-        "codeqwen:latest", 
-        "deepseek-coder:latest",
-        "llama2:latest",
-        "mistral:latest",
-        "phi:latest",
-        "wizardcoder:latest",
-        "starcoder:latest"
-    ]
-
-def get_code_templates():
-    """Return code generation template buttons"""
-    templates = {
-        
-    }
-    return templates
-
-def show_code_templates():
-    """Display code template buttons"""
-    templates = get_code_templates()
-    
-    cols = st.columns(2)
-    for i, (name, prompt) in enumerate(templates.items()):
-        with cols[i % 2]:
-            if st.button(f"📝 {name}", use_container_width=True, key=f"template_{i}"):
-                st.session_state.template_prompt = prompt + " "
-                st.rerun()
-
 def format_response_with_code(text):
     """Format response with proper code block styling"""
     parts = text.split('```')
@@ -168,10 +167,7 @@ def organize_chats_by_date(chats):
     last_week = today - timedelta(days=7)
     
     sections = {
-        "Today": [],
-        "Yesterday": [],
-        "Previous 7 Days": [],
-        "Older": []
+        "Today": [], "Yesterday": [], "Previous 7 Days": [], "Older": []
     }
     
     for chat in chats:
@@ -205,20 +201,21 @@ def initialize_session_state():
         "next_chat_id": next_chat_id,
         "search_query": "",
         "ollama_url": "http://localhost:11434",
-        "model": "codellama:latest",
+        "model": "llama2",
         "temperature": 0.3,
         "max_tokens": 2000,
         "use_streaming": True,
         "max_chat_history": MAX_CHAT_HISTORY,
-        "template_prompt": "",
         "ocr_extracted_text": "",
         "ocr_image_uploaded": False,
-        "ocr_image_preview": None,
         "ocr_context_ready": False,
         "ocr_active_image": None,
-        "auto_process_image": False,
-        "image_chat_mode": False,
-        "show_file_uploader": False
+        "ollama_connected": False,
+        "available_models": [],
+        "tesseract_configured": False,
+        "user_text_input": "",
+        "current_uploaded_image": None,
+        "show_uploader": False
     }
     
     for key, value in default_state.items():
@@ -229,7 +226,38 @@ def initialize_session_state():
 initialize_session_state()
 
 # Initialize OCR
-ocr_available = setup_ocr()
+if not st.session_state.tesseract_configured:
+    st.session_state.tesseract_configured = configure_tesseract()
+
+# ===== OLLAMA CONNECTION FUNCTIONS =====
+def test_ollama_connection():
+    """Test connection to Ollama and get available models"""
+    try:
+        url = f"{st.session_state.ollama_url}/api/tags"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            st.session_state.available_models = [model['name'] for model in data.get('models', [])]
+            st.session_state.ollama_connected = True
+            return True
+        else:
+            st.session_state.ollama_connected = False
+            return False
+    except:
+        st.session_state.ollama_connected = False
+        return False
+
+def get_available_models():
+    """Get list of available models from Ollama"""
+    try:
+        url = f"{st.session_state.ollama_url}/api/tags"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return [model['name'] for model in data.get('models', [])]
+        return []
+    except:
+        return []
 
 def get_ai_response(user_input, conversation_history=None):
     """Generate AI response using Ollama local LLM with OCR context"""
@@ -265,28 +293,47 @@ For non-code questions, provide clear, concise, and accurate responses."""
         
         url = f"{st.session_state.ollama_url}/api/chat"
         
-        payload = {
-            "model": st.session_state.model,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": st.session_state.temperature,
-                "num_predict": st.session_state.max_tokens
+        # Try multiple models if the default one fails
+        models_to_try = [st.session_state.model]
+        if st.session_state.available_models:
+            # Add other available models to try
+            for model in st.session_state.available_models:
+                if model not in models_to_try:
+                    models_to_try.append(model)
+        
+        for model in models_to_try[:3]:  # Try up to 3 models
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "options": {
+                    "temperature": st.session_state.temperature,
+                    "num_predict": st.session_state.max_tokens
+                }
             }
-        }
+            
+            try:
+                response = requests.post(url, json=payload, timeout=120)
+                
+                if response.status_code == 200:
+                    response_data = response.json()
+                    return response_data['message']['content']
+                elif response.status_code == 404:
+                    continue  # Try next model if this one doesn't exist
+                else:
+                    # If this is the last model to try, return error
+                    if model == models_to_try[-1]:
+                        return f"Error: Ollama API returned status code {response.status_code}. Please check if the model '{model}' is downloaded (run: ollama pull {model.split(':')[0]})"
+            except requests.exceptions.ConnectionError:
+                return f"Connection error: Cannot connect to Ollama at {st.session_state.ollama_url}. Please make sure Ollama is running."
+            except requests.exceptions.Timeout:
+                return "Request timeout: Ollama is taking too long to respond."
+            except Exception as e:
+                if model == models_to_try[-1]:
+                    return f"An error occurred: {str(e)}"
         
-        response = requests.post(url, json=payload, timeout=120)
+        # return "Error: No working models found. Please make sure you have at least one model downloaded (e.g., ollama pull llama2)."
         
-        if response.status_code == 200:
-            response_data = response.json()
-            return response_data['message']['content']
-        else:
-            return f"Error: Ollama API returned status code {response.status_code}. Make sure Ollama is running and the model is available."
-        
-    except requests.exceptions.ConnectionError:
-        return f"Connection error: Cannot connect to Ollama at {st.session_state.ollama_url}. Please make sure Ollama is running."
-    except requests.exceptions.Timeout:
-        return "Request timeout: Ollama is taking too long to respond."
     except Exception as e:
         return f"An error occurred: {str(e)}"
 
@@ -324,60 +371,61 @@ For non-code questions, provide clear, concise, and accurate responses."""
         
         url = f"{st.session_state.ollama_url}/api/chat"
         
-        payload = {
-            "model": st.session_state.model,
-            "messages": messages,
-            "stream": True,
-            "options": {
-                "temperature": st.session_state.temperature,
-                "num_predict": st.session_state.max_tokens
+        # Try multiple models if the default one fails
+        models_to_try = [st.session_state.model]
+        if st.session_state.available_models:
+            for model in st.session_state.available_models:
+                if model not in models_to_try:
+                    models_to_try.append(model)
+        
+        for model in models_to_try[:3]:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "options": {
+                    "temperature": st.session_state.temperature,
+                    "num_predict": st.session_state.max_tokens
+                }
             }
-        }
+            
+            try:
+                response = requests.post(url, json=payload, timeout=180, stream=True)
+                
+                if response.status_code == 200:
+                    full_response = ""
+                    for line in response.iter_lines():
+                        if line:
+                            try:
+                                line_data = json.loads(line)
+                                if 'message' in line_data and 'content' in line_data['message']:
+                                    content = line_data['message']['content']
+                                    full_response += content
+                                    yield content
+                                elif 'done' in line_data and line_data['done']:
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                    return full_response
+                elif response.status_code == 404:
+                    continue  # Try next model
+                else:
+                    if model == models_to_try[-1]:
+                        yield f"Error: Ollama API returned status code {response.status_code}. Please check if the model '{model}' is downloaded."
+            except requests.exceptions.ConnectionError:
+                if model == models_to_try[-1]:
+                    yield f"Connection error: Cannot connect to Ollama at {st.session_state.ollama_url}"
+            except requests.exceptions.Timeout:
+                if model == models_to_try[-1]:
+                    yield "Request timeout: Ollama is taking too long to respond."
+            except Exception as e:
+                if model == models_to_try[-1]:
+                    yield f"An error occurred: {str(e)}"
         
-        response = requests.post(url, json=payload, timeout=180, stream=True)
+        # yield "Error: No working models found. Please download a model first (e.g., ollama pull llama2)."
         
-        if response.status_code == 200:
-            full_response = ""
-            for line in response.iter_lines():
-                if line:
-                    line_data = json.loads(line)
-                    if 'message' in line_data and 'content' in line_data['message']:
-                        content = line_data['message']['content']
-                        full_response += content
-                        yield content
-                    elif 'done' in line_data and line_data['done']:
-                        break
-            return full_response
-        else:
-            yield f"Error: Ollama API returned status code {response.status_code}"
-        
-    except requests.exceptions.ConnectionError:
-        yield f"Connection error: Cannot connect to Ollama at {st.session_state.ollama_url}"
-    except requests.exceptions.Timeout:
-        yield "Request timeout: Ollama is taking too long to respond."
     except Exception as e:
         yield f"An error occurred: {str(e)}"
-
-def get_available_models():
-    """Get list of available models from Ollama"""
-    try:
-        url = f"{st.session_state.ollama_url}/api/tags"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return [model['name'] for model in data.get('models', [])]
-        return []
-    except:
-        return []
-
-def test_ollama_connection():
-    """Test connection to Ollama"""
-    try:
-        url = f"{st.session_state.ollama_url}/api/tags"
-        response = requests.get(url, timeout=10)
-        return response.status_code == 200
-    except:
-        return False
 
 def save_persistent_data():
     """Save chat history to persistent storage"""
@@ -480,10 +528,9 @@ def start_new_chat():
     st.session_state.current_chat_id = new_chat_id
     st.session_state.chat_started = False
     st.session_state.search_query = ""
-    st.session_state.template_prompt = ""
-    st.session_state.image_chat_mode = False
     clear_ocr_data()
-    st.session_state.show_file_uploader = False
+    st.session_state.user_text_input = ""
+    st.session_state.show_uploader = False
 
 def delete_chat(chat_id):
     """Delete a chat from history"""
@@ -493,9 +540,9 @@ def delete_chat(chat_id):
         st.session_state.messages = []
         st.session_state.current_chat_id = None
         st.session_state.chat_started = False
-        st.session_state.image_chat_mode = False
         clear_ocr_data()
-        st.session_state.show_file_uploader = False
+        st.session_state.user_text_input = ""
+        st.session_state.show_uploader = False
     
     save_persistent_data()
     
@@ -508,10 +555,9 @@ def delete_all_chats():
     st.session_state.current_chat_id = None
     st.session_state.chat_started = False
     st.session_state.next_chat_id = 1
-    st.session_state.template_prompt = ""
-    st.session_state.image_chat_mode = False
     clear_ocr_data()
-    st.session_state.show_file_uploader = False
+    st.session_state.user_text_input = ""
+    st.session_state.show_uploader = False
     
     save_persistent_data()
     
@@ -535,10 +581,6 @@ def load_chat(chat_id):
                 st.session_state.ocr_active_image = chat["image_data"]
                 st.session_state.ocr_extracted_text = chat.get("extracted_text", "")
                 st.session_state.ocr_context_ready = True
-                st.session_state.image_chat_mode = True
-            else:
-                st.session_state.image_chat_mode = False
-                clear_ocr_data()
             break
 
 def filter_chats(search_query):
@@ -561,99 +603,48 @@ def filter_chats(search_query):
     return filtered_chats
 
 def process_uploaded_image(uploaded_image):
-    """Process uploaded image and add to current chat (same chat ID)"""
+    """Process uploaded image and extract text without showing OCR processing"""
     if uploaded_image is not None:
         image = Image.open(uploaded_image)
         
-        with st.spinner("Extracting text from image..."):
-            extracted_text = extract_text_from_image(image)
-            
-            st.session_state.ocr_extracted_text = extracted_text
-            st.session_state.ocr_image_uploaded = True
-            st.session_state.ocr_context_ready = True
-            st.session_state.auto_process_image = True
-            st.session_state.image_chat_mode = True
-            
-            current_image_data = uploaded_image.getvalue()
-            
-            image_message = {
-                "role": "user", 
-                "content": "📷 Image uploaded for analysis",
-                "type": "image",
-                "image_data": current_image_data,
-                "extracted_text": extracted_text
-            }
-            st.session_state.messages.append(image_message)
-            
-            if not st.session_state.chat_started:
-                st.session_state.chat_started = True
-            
-            if extracted_text and len(extracted_text) > 10:
-                return True
-            else:
-                return False
-
-def display_ocr_image_upload():
-    """Display image upload button that shows file extract box when clicked"""
-    
-    st.markdown("""
-    <style>
-    .file-uploader-hidden {
-        display: none !important;
-    }
-    .custom-upload-btn {
-        background-color: #f0f2f6;
-        border: 1px solid #d0d0d0;
-        border-radius: 4px;
-        padding: 8px 12px;
-        cursor: pointer;
-        text-align: center;
-        font-size: 14px;
-        margin-bottom: 5px;
-    }
-    .custom-upload-btn:hover {
-        background-color: #e0e2e6;
-    }
-    .file-uploader-visible {
-        display: block !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    col1, col2 = st.columns([4, 1])
-    
-    with col1:
-        if st.session_state.template_prompt:
-            prompt = st.chat_input("Complete your code request...", key="chat_input_ocr")
-        else:
-            prompt = st.chat_input("Message ChatGPT...", key="chat_input_ocr")
-    
-    with col2:
-        if st.button("📷 Upload", key="custom_upload_btn", use_container_width=True):
-            st.session_state.show_file_uploader = not st.session_state.show_file_uploader
+        # Extract text silently without showing spinner
+        extracted_text = extract_text_from_image(image)
         
-        if st.session_state.get('show_file_uploader', False):
-            uploaded_image = st.file_uploader(
-                "Choose an image file",
-                type=["jpg", "jpeg", "png"],
-                key="sidebar_image_upload",
-                label_visibility="visible",
-                help="Upload image for analysis"
-            )
-            
-            if uploaded_image is not None and not st.session_state.get('auto_process_image', False):
-                success = process_uploaded_image(uploaded_image)
-                if success:
-                    st.success("✅ Image uploaded successfully!")
-                    st.session_state.auto_process_image = True
-                    st.session_state.show_file_uploader = False
-                    st.rerun()
-    
-    return prompt
+        st.session_state.ocr_extracted_text = extracted_text
+        st.session_state.ocr_image_uploaded = True
+        st.session_state.ocr_context_ready = True
+        
+        # Resize image for consistent small display before storing
+        resized_image = resize_image_for_display(image, IMAGE_DISPLAY_WIDTH)
+        img_byte_arr = io.BytesIO()
+        resized_image.save(img_byte_arr, format='PNG')
+        current_image_data = img_byte_arr.getvalue()
+        
+        st.session_state.ocr_active_image = current_image_data
+        st.session_state.current_uploaded_image = uploaded_image
+        
+        return True, extracted_text
+    return False, ""
+
+# Test connection on startup
+if not st.session_state.ollama_connected:
+    test_ollama_connection()
 
 # Sidebar
 with st.sidebar:
-    st.title("🤖 ChatGPT")
+    st.title("🤖 AI Code Generator")
+    
+    # Connection status
+    if st.session_state.ollama_connected:
+        if st.session_state.available_models:
+            st.caption(f"Models: {len(st.session_state.available_models)} available")
+    else:
+        st.error("❌ Ollama Not Connected")
+        st.markdown("""
+        **To fix this:**
+        1. Install Ollama from [ollama.ai](https://ollama.ai)
+        2. Run: `ollama serve`
+        """)
     
     if st.button("+ New Chat", use_container_width=True, type="primary"):
         start_new_chat()
@@ -663,9 +654,6 @@ with st.sidebar:
         if st.button("🗑️ Clear All Chats", use_container_width=True, type="secondary"):
             delete_all_chats()
             st.rerun()
-    
-    if not ocr_available:
-        st.warning("⚠️ OCR not available. Install Tesseract OCR for text extraction.")
     
     search_query = st.text_input(
         "Search chats",
@@ -737,25 +725,19 @@ with st.sidebar:
             st.info("No chat history yet. Start a new chat to begin!")
 
 # Main chat area
-st.title("ChatGPT")
+st.title("🤖 AI Code Generator")
 
-if not test_ollama_connection():
-    st.error(f"⚠️ Cannot connect to Ollama at {st.session_state.ollama_url}. Please make sure Ollama is running.")
-    st.info("**For optimal code generation, install these recommended models:**")
+if not st.session_state.ollama_connected:
+    st.error(f"⚠️ Cannot connect to Ollama at {st.session_state.ollama_url}")
+    st.info("**To get started:**")
     st.code("""
-# Install Ollama
-curl -fsSL https://ollama.ai/install.sh | sh
-
-# Start Ollama service
+# Install Ollama first from https://ollama.ai
+# Then run these commands:
 ollama serve
-
-# Pull code-specific models (in a new terminal)
-ollama pull codellama:latest
-ollama pull deepseek-coder:latest
-ollama pull codeqwen:latest
-ollama pull llama2:latest
+ollama pull llama2
     """)
 
+# Display current chat title
 if st.session_state.current_chat_id and st.session_state.messages:
     current_chat = next((chat for chat in st.session_state.chat_history 
                         if chat["id"] == st.session_state.current_chat_id), None)
@@ -763,34 +745,33 @@ if st.session_state.current_chat_id and st.session_state.messages:
         title_prefix = "🖼️ " if current_chat.get("image_data") else ""
         st.subheader(f"{title_prefix}{current_chat['title']}")
 
-if not st.session_state.image_chat_mode and (not st.session_state.messages or len(st.session_state.messages) == 0):
-    show_code_templates()
+# Create a container for ALL chat messages (both existing and new)
+chat_container = st.container()
 
-if st.session_state.template_prompt and not st.session_state.messages:
-    st.info(f"💡 Template ready: **{st.session_state.template_prompt}** - Start typing to complete your request.")
-
-if st.session_state.messages:
-    for message in st.session_state.messages:
-        if message["role"] == "user":
-            with st.container():
+with chat_container:
+    # Display all existing chat messages
+    if st.session_state.messages:
+        for i, message in enumerate(st.session_state.messages):
+            if message["role"] == "user":
+                # User messages on the right side using columns
                 col1, col2 = st.columns([2, 2])
                 with col2:
                     with st.chat_message("user"):
-                        if message.get("type") == "image" and message.get("image_data"):
+                        # Check if this message has image data
+                        if message.get("image_data"):
                             try:
+                                # Display the image with small consistent size
                                 image = Image.open(io.BytesIO(message["image_data"]))
-                                st.image(image, caption="Uploaded Image", use_container_width=True, width=400)
-                                st.caption("📷 Image uploaded for analysis")
-                                if message.get("extracted_text"):
-                                    with st.expander("📝 Extracted Text"):
-                                        st.text(message["extracted_text"])
+                                st.image(image, caption="Uploaded Image", use_container_width=False, width=IMAGE_DISPLAY_WIDTH)
                             except Exception as e:
-                                st.write("📷 Image uploaded for analysis")
-                        else:
+                                st.write("📷 Image uploaded")
+                        
+                        # Always display the user's text content
+                        if message.get("content"):
                             st.write(message["content"])
-        else:
-            with st.container():
-                col1, col2 = st.columns([3, 1])
+            else:
+                # Assistant messages on the left side using columns
+                col1, col2 = st.columns([4, 1])
                 with col1:
                     with st.chat_message("assistant"):
                         content = message["content"]
@@ -812,79 +793,56 @@ if st.session_state.messages:
                                     st.code(code_content, language=language)
                         else:
                             st.write(content)
-else:
-    if not st.session_state.current_chat_id:
-        st.info("👈 Start a new chat or select one from the history to begin!")
+
+# Input section at the bottom with separator
+st.markdown("---")
+
+# Combined input area for both text and image
+col1, col2 = st.columns([4, 1])
+
+with col1:
+    user_input = st.chat_input(
+        "Type your message here...",
+        key="user_input_chat"
+    )
+
+with col2:
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+    
+    # Add an upload button that triggers the file uploader with negative margin
+    if st.button("📷 Upload File", use_container_width=True, help="Upload an image for OCR analysis"):
+        # Toggle the uploader visibility
+        st.session_state.show_uploader = not st.session_state.get('show_uploader', False)
+
+    # File uploader (only shown when button is clicked)
+    if st.session_state.get('show_uploader', False):
+        uploaded_image = st.file_uploader(
+            "📷 Upload Image",
+            type=["jpg", "jpeg", "png"],
+            key="image_uploader",
+            help="Upload an image to analyze",
+            label_visibility="collapsed"
+        )
+        
+        # Show small image preview when image is uploaded
+        if uploaded_image is not None:
+            try:
+                image = Image.open(uploaded_image)
+                resized_image = resize_image_for_display(image, IMAGE_DISPLAY_WIDTH)
+                # st.image(resized_image, caption="Image Preview", use_container_width=False, width=IMAGE_DISPLAY_WIDTH)
+            except Exception as e:
+                st.error(f"Error previewing image: {e}")
+    
+        # Add a button to close the uploader
+        # if st.button("Close Upload", use_container_width=True):
+        #     st.session_state.show_uploader = False
+        #     st.rerun()
     else:
-        if st.session_state.image_chat_mode:
-            st.info("💡 Upload an image to start analyzing its content!")
-        else:
-            st.info("💡 Start a conversation with your AI code assistant!")
+        uploaded_image = None
 
-# Auto-generate response when image is uploaded
-if st.session_state.get('auto_process_image') and st.session_state.get('ocr_extracted_text'):
-    if not any(msg.get("content", "").startswith("I've analyzed the uploaded image") for msg in st.session_state.messages if msg["role"] == "assistant"):
-        analysis_prompt = f"""
-        I've uploaded an image with the following extracted text: 
-        "{st.session_state.ocr_extracted_text}"
-        
-        Please analyze this content and provide:
-        1. A summary of what the text is about
-        
-        Keep the response concise but informative.
-        """
-        
-        chat_id = get_or_create_chat_session()
-        
-        if not st.session_state.chat_started:
-            st.session_state.chat_started = True
-        
-        with st.container():
-            col1, col2 = st.columns([0.8, 0.2])
-            with col1:
-                with st.chat_message("assistant"):
-                    with st.spinner("🤔 Analyzing image content..."):
-                        if st.session_state.use_streaming:
-                            message_placeholder = st.empty()
-                            full_response = ""
-                            
-                            try:
-                                for chunk in get_ai_response_streamed(analysis_prompt, st.session_state.messages[:-1]):
-                                    full_response += chunk
-                                    if '```' in full_response:
-                                        message_placeholder.markdown(format_response_with_code(full_response + "▌"), unsafe_allow_html=True)
-                                    else:
-                                        message_placeholder.write(full_response + "▌")
-                                
-                                if '```' in full_response:
-                                    message_placeholder.markdown(format_response_with_code(full_response), unsafe_allow_html=True)
-                                else:
-                                    message_placeholder.write(full_response)
-                                ai_response = full_response
-                                
-                            except Exception as e:
-                                error_msg = f"Error during streaming: {str(e)}"
-                                st.error(error_msg)
-                                ai_response = error_msg
-                        else:
-                            ai_response = get_ai_response(analysis_prompt, st.session_state.messages[:-1])
-                            if '```' in ai_response:
-                                st.markdown(format_response_with_code(ai_response), unsafe_allow_html=True)
-                            else:
-                                st.write(ai_response)
-
-        st.session_state.messages.append({"role": "assistant", "content": ai_response})
-        
-        save_current_chat()
-        
-        st.session_state.auto_process_image = False
-        st.rerun()
-
-# Chat input with OCR image upload button
-prompt = display_ocr_image_upload()
-
-if prompt:
-    if not test_ollama_connection():
+# Process when user presses Enter in chat input
+if user_input:
+    if not st.session_state.ollama_connected:
         st.error(f"Cannot connect to Ollama. Please make sure it's running at {st.session_state.ollama_url}")
         st.stop()
     
@@ -898,66 +856,109 @@ if prompt:
     if not st.session_state.chat_started:
         st.session_state.chat_started = True
     
-    if st.session_state.template_prompt:
-        full_prompt = st.session_state.template_prompt + prompt
-        st.session_state.template_prompt = ""
+    # Process image if uploaded (silently without showing OCR processing)
+    image_data = None
+    extracted_text = ""
+    if uploaded_image is not None:
+        success, extracted_text = process_uploaded_image(uploaded_image)
+        if success:
+            image_data = st.session_state.ocr_active_image
+    
+    # Create message content
+    message_content = user_input
+    
+    # Add user message to chat
+    if uploaded_image is not None:
+        message_data = {
+            "role": "user", 
+            "content": message_content,
+            "image_data": image_data,
+            "extracted_text": extracted_text
+        }
     else:
-        full_prompt = prompt
+        message_data = {
+            "role": "user", 
+            "content": message_content
+        }
     
-    st.session_state.messages.append({"role": "user", "content": full_prompt})
+    st.session_state.messages.append(message_data)
     
-    with st.container():
-        col1, col2 = st.columns([0.2, 0.8])
-        with col2:
-            with st.chat_message("user"):
-                st.write(full_prompt)
-
-    with st.container():
-        col1, col2 = st.columns([0.8, 0.2])
-        with col1:
-            with st.chat_message("assistant"):
-                code_keywords = ['code', 'program', 'function', 'algorithm', 'script', 'class', 'def ', 'import ', 'function ', 'const ', 'let ', 'var ', 'public ', 'private ']
-                is_code_request = any(keyword in full_prompt.lower() for keyword in code_keywords)
-                
-                with st.spinner("💻 Generating code..." if is_code_request else "🤔 Thinking..."):
-                    if st.session_state.use_streaming:
-                        message_placeholder = st.empty()
-                        full_response = ""
-                        
-                        try:
-                            for chunk in get_ai_response_streamed(full_prompt, st.session_state.messages[:-1]):
-                                full_response += chunk
-                                if '```' in full_response:
-                                    message_placeholder.markdown(format_response_with_code(full_response + "▌"), unsafe_allow_html=True)
-                                else:
-                                    message_placeholder.write(full_response + "▌")
-                            
-                            if '```' in full_response:
-                                message_placeholder.markdown(format_response_with_code(full_response), unsafe_allow_html=True)
-                            else:
-                                message_placeholder.write(full_response)
-                            ai_response = full_response
-                            
-                        except Exception as e:
-                            error_msg = f"Error during streaming: {str(e)}"
-                            st.error(error_msg)
-                            ai_response = error_msg
-                    else:
-                        ai_response = get_ai_response(full_prompt, st.session_state.messages[:-1])
-                        if '```' in ai_response:
-                            st.markdown(format_response_with_code(ai_response), unsafe_allow_html=True)
-                        else:
-                            st.write(ai_response)
-
-    st.session_state.messages.append({"role": "assistant", "content": ai_response})
-    
+    # Save chat immediately after adding user message
     save_current_chat(update_timestamp=True)
     
+    # Display user message immediately on the RIGHT side using columns
+    col1, col2 = st.columns([2, 2])
+    with col2:
+        with st.chat_message("user"):
+            if uploaded_image is not None:
+                try:
+                    image = Image.open(io.BytesIO(image_data))
+                    st.image(image, caption="Uploaded File", use_container_width=False, width=IMAGE_DISPLAY_WIDTH)
+                except Exception as e:
+                    st.write("📷 Image uploaded")
+            
+            if message_content:
+                st.write(message_content)
+
+    # Generate and display AI response immediately below user input on the LEFT side using columns
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        with st.chat_message("assistant"):
+            with st.spinner("🤔 Thinking..."):
+                # Combine image context with user input
+                full_prompt = message_content
+                if extracted_text and not full_prompt.strip():
+                    full_prompt = "What can you tell me about the content of this image?"
+                elif extracted_text and full_prompt.strip():
+                    full_prompt = full_prompt
+                
+                if st.session_state.use_streaming:
+                    message_placeholder = st.empty()
+                    full_response = ""
+                    
+                    try:
+                        for chunk in get_ai_response_streamed(full_prompt, st.session_state.messages[:-1]):
+                            full_response += chunk
+                            if '```' in full_response:
+                                message_placeholder.markdown(format_response_with_code(full_response + "▌"), unsafe_allow_html=True)
+                            else:
+                                message_placeholder.write(full_response + "▌")
+                        
+                        if '```' in full_response:
+                            message_placeholder.markdown(format_response_with_code(full_response), unsafe_allow_html=True)
+                        else:
+                            message_placeholder.write(full_response)
+                        ai_response = full_response
+                        
+                    except Exception as e:
+                        error_msg = f"Error during streaming: {str(e)}"
+                        st.error(error_msg)
+                        ai_response = error_msg
+                else:
+                    ai_response = get_ai_response(full_prompt, st.session_state.messages[:-1])
+                    if '```' in ai_response:
+                        st.markdown(format_response_with_code(ai_response), unsafe_allow_html=True)
+                    else:
+                        st.write(ai_response)
+
+    # Add AI response to messages
+    st.session_state.messages.append({"role": "assistant", "content": ai_response})
+    
+    # Save chat with AI response
+    save_current_chat(update_timestamp=True)
+    
+    # Clear the uploaded image after sending and hide uploader
+    st.session_state.current_uploaded_image = None
+    st.session_state.show_uploader = False
+    
+    # Rerun to update the conversation history
     st.rerun()
 
+# Memory warning
 if len(st.session_state.chat_history) >= st.session_state.max_chat_history:
     st.warning(f"""
     ⚠️ **Memory Full!** 
     
     You've reached the maximum limit of {st.session_state.max_chat_history} chats. 
+    Delete some old chats to create new ones.
     """)
